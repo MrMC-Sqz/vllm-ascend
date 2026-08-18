@@ -872,6 +872,7 @@ estimated_times:
   tests/ut/eplb/core/a2/test_eplb_utils.py: 30
   tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
+  tests/ut/ops/a2/test_chunk_scaled_dot_kkt.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 80
   tests/ut/ops/a2/test_token_dispatcher.py: 30
