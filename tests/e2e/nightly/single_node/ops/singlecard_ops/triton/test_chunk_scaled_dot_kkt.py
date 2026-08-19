@@ -1,38 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# Numerical test for vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt (Triton-Ascend)
+# against a plain PyTorch fp32 reference.
+# Requires NPU and Triton-Ascend.
 #
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# See vllm_ascend/ops/triton/doc/chunk_scaled_dot_kkt.md for the operator spec.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
-"""Numerical UT for ``chunk_scaled_dot_kkt_fwd_kernel``.
-
-The kernel computes, per (batch, head, chunk)::
-
-    A = strict_tril( beta_i * safe_exp(g_i - g_j) * (K @ K^T) )
-
-and is the first stage of the GDN WY representation
-(``chunk_gated_delta_rule_fwd`` in ``vllm_ascend/ops/triton/fla/chunk.py``).
-
-Requires a real NPU: the kernel is Triton, and ``tests/ut/conftest.py`` mocks
-``triton.runtime`` away on CPU runners.  Hence this file lives under ``a2/``.
-
-Regression scope:
-  * #10033 -- grid moved from ``(NT, 1)`` + serial ``for i_bh in range(B*H)``
-    to ``(num_core,)`` + ``tl.range(core_id, task_num, num_core)``.  The
-    ``task_num % num_core != 0`` cases below target that change directly.
-  * #11577 -- ``bh_step``/``task_num``/``num_core`` demoted from
-    ``tl.constexpr`` to runtime args to stop recompilation.
-"""
+# Regression scope:
+#   * #10033 -- grid moved from (NT, 1) with a serial `for i_bh in range(B*H)`
+#     loop to (num_core,) with `tl.range(core_id, task_num, num_core)`.
+#   * #11577 -- bh_step/task_num/num_core demoted from tl.constexpr to runtime
+#     args to stop recompilation.
 
 import gc
 
@@ -49,7 +26,7 @@ from vllm_ascend.ops.triton.triton_utils import get_aicore_num, init_device_prop
 
 DEVICE = "npu"
 CHUNK_SIZE = 64
-# ``chunk_scaled_dot_kkt_fwd`` hardcodes the K-loop block width.
+# chunk_scaled_dot_kkt_fwd hardcodes the K-loop block width.
 BLOCK_K = 128
 
 # bf16/fp16 inputs are accumulated in fp32 inside tl.dot; the reference upcasts
@@ -59,13 +36,29 @@ _TOLERANCE = {
     torch.float16: (2e-3, 2e-3),
 }
 
+SHAPE_CASES = [
+    pytest.param(1, 64, 1, 1, 64, id="single-chunk"),
+    pytest.param(2, 256, 4, 4, 128, id="multi-chunk-mha"),
+    pytest.param(2, 200, 4, 4, 128, id="ragged-tail"),
+    pytest.param(1, 128, 8, 2, 64, id="gqa-group4"),
+    pytest.param(1, 128, 2, 2, 256, id="k-gt-block-k"),
+    pytest.param(1, 33, 2, 2, 64, id="t-lt-chunk"),
+]
+
+VARLEN_CASES = [
+    pytest.param([64], 2, 2, 64, id="one-seq-aligned"),
+    pytest.param([37, 91, 128], 4, 4, 128, id="three-seqs-ragged"),
+    pytest.param([1, 200, 63, 65], 2, 1, 64, id="degenerate-and-gqa"),
+]
+
 
 @pytest.fixture(autouse=True)
-def _init_device():
+def _npu_env():
     init_device_properties_triton()
     yield
     gc.collect()
     torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 def _ref_chunk_scaled_dot_kkt_fwd(
@@ -146,17 +139,8 @@ def _assert_close(actual, expected, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize(
-    ("B", "T", "H", "Hg", "K"),
-    [
-        pytest.param(1, 64, 1, 1, 64, id="single-chunk"),
-        pytest.param(2, 256, 4, 4, 128, id="multi-chunk-mha"),
-        pytest.param(2, 200, 4, 4, 128, id="ragged-tail"),
-        pytest.param(1, 128, 8, 2, 64, id="gqa-group4"),
-        pytest.param(1, 128, 2, 2, 256, id="k-gt-block-k"),
-        pytest.param(1, 33, 2, 2, 64, id="t-lt-chunk"),
-    ],
-)
+@pytest.mark.parametrize(("B", "T", "H", "Hg", "K"), SHAPE_CASES)
+@torch.inference_mode()
 def test_fixed_length_matches_reference(B, T, H, Hg, K, dtype):
     """Non-varlen path, through the public wrapper.
 
@@ -178,15 +162,9 @@ def test_fixed_length_matches_reference(B, T, H, Hg, K, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize(
-    ("seqlens", "H", "Hg", "K"),
-    [
-        pytest.param([64], 2, 2, 64, id="one-seq-aligned"),
-        pytest.param([37, 91, 128], 4, 4, 128, id="three-seqs-ragged"),
-        pytest.param([1, 200, 63, 65], 2, 1, 64, id="degenerate-and-gqa"),
-    ],
-)
+@pytest.mark.parametrize(("seqlens", "H", "Hg", "K"), VARLEN_CASES)
 @pytest.mark.parametrize("prebuilt_indices", [False, True], ids=["indices-derived", "indices-prebuilt"])
+@torch.inference_mode()
 def test_varlen_matches_reference(seqlens, H, Hg, K, dtype, prebuilt_indices):
     """Varlen path (IS_VARLEN=True), with and without prebuilt chunk_indices.
 
@@ -217,6 +195,7 @@ def test_varlen_matches_reference(seqlens, H, Hg, K, dtype, prebuilt_indices):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
 def test_non_monotonic_gate_zeroes_positive_diff(dtype):
     """``safe_exp`` must return 0 -- not ``exp(x)`` -- when ``g_i - g_j > 0``.
 
@@ -242,15 +221,16 @@ def test_non_monotonic_gate_zeroes_positive_diff(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
 def test_use_g_false_branch_via_device_operator(dtype):
     """USE_G=False, reached by launching through ``DeviceOperator`` directly.
 
     The wrapper cannot reach this branch: ``chunk_scaled_dot_kkt_fwd`` calls
     ``torch.permute(g_cumsum, ...)`` unconditionally, so passing the documented
     ``g_cumsum=None`` raises AttributeError before the kernel is launched.  The
-    heuristic and the ``if USE_G:`` block exist regardless, and GDN is not the
-    only conceivable caller, so cover the branch at the launch layer and keep
-    the wrapper gap documented rather than untested.
+    heuristic and the ``if USE_G:`` block exist regardless, so cover the branch
+    at the launch layer and keep the wrapper gap documented rather than
+    untested.
     """
     from vllm_ascend.device.device_op import DeviceOperator
 
@@ -283,6 +263,7 @@ def test_use_g_false_branch_via_device_operator(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
 def test_output_is_strictly_lower_triangular(dtype):
     """Structural invariant: diagonal and upper triangle are exactly zero.
 
@@ -305,6 +286,7 @@ def test_output_is_strictly_lower_triangular(dtype):
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("task_offset", [-1, 0, 1], ids=["under-core", "exact-core", "over-core"])
+@torch.inference_mode()
 def test_task_num_not_divisible_by_num_core(dtype, task_offset):
     """Regression for #10033: round-robin ``tl.range(core_id, task_num, num_core)``.
 
@@ -330,12 +312,14 @@ def test_task_num_not_divisible_by_num_core(dtype, task_offset):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
 def test_multi_head_task_decomposition(dtype):
     """Regression for #10033, batch/head axis.
 
     ``task_id -> (i_t_i, i_bh) -> (i_b, i_h)`` is the part the PR rewrote.
-    B and H are chosen coprime-ish and unequal so a swapped ``//``/``%`` or a
-    transposed (i_b, i_h) split cannot coincidentally produce the right answer.
+    B and H are chosen unequal and non-power-of-two so a swapped ``//``/``%``
+    or a transposed (i_b, i_h) split cannot coincidentally produce the right
+    answer.
     """
     B, T, H, Hg, K = 3, 320, 5, 5, 64
     k, beta, g_cumsum = _make_inputs(B, T, H, Hg, K, dtype, seed=5)
@@ -368,6 +352,7 @@ def _kernel_cache_size() -> int | None:
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@torch.inference_mode()
 def test_varying_task_num_does_not_recompile(dtype):
     """Regression for #11577: ``bh_step``/``task_num``/``num_core`` are runtime args.
 
