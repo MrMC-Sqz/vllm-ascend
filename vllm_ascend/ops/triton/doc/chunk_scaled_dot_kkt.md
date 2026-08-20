@@ -127,7 +127,11 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_chunk_sc
 
 覆盖范围：定长与变长两条路径、`chunk_indices` 内部生成与外部预建、GQA head 映射、
 非对齐尾块、`K > BK`、`safe_exp` 置零分支、`USE_G=False` 分支、严格下三角结构不变量，
-以及 `task_num` 相对 `num_core` 不整除、多 batch/多 head 任务分解、变化 `task_num` 不触发重编译。
+以及针对 #10033 的 `task_num` 相对 `num_core` 不整除、多 batch/多 head 任务分解。
+
+未覆盖：#11577 的重编译行为属于性能特征而非计算正确性，且检测手段依赖 Triton
+内部的 JIT 缓存结构、跨版本不稳定，故未纳入用例。该约束以文档形式记录在上方
+「约束说明」中。
 
 ## 变更记录
 

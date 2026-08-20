@@ -5,11 +5,9 @@
 #
 # See vllm_ascend/ops/triton/doc/chunk_scaled_dot_kkt.md for the operator spec.
 #
-# Regression scope:
-#   * #10033 -- grid moved from (NT, 1) with a serial `for i_bh in range(B*H)`
-#     loop to (num_core,) with `tl.range(core_id, task_num, num_core)`.
-#   * #11577 -- bh_step/task_num/num_core demoted from tl.constexpr to runtime
-#     args to stop recompilation.
+# Regression scope: #10033 -- the grid moved from (NT, 1) with a serial
+# `for i_bh in range(B*H)` loop to (num_core,) with
+# `tl.range(core_id, task_num, num_core)`.
 
 import gc
 
@@ -17,10 +15,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401  # registers the npu backend / torch.npu namespace
 
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import (
-    chunk_scaled_dot_kkt_fwd,
-    chunk_scaled_dot_kkt_fwd_kernel,
-)
+from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
 from vllm_ascend.ops.triton.triton_utils import get_aicore_num, init_device_properties_triton
 
@@ -330,52 +325,3 @@ def test_multi_head_task_decomposition(dtype):
     expected = _ref_chunk_scaled_dot_kkt_fwd(k, beta, g_cumsum, cu_seqlens=None)
 
     _assert_close(actual, expected, dtype)
-
-
-def _kernel_cache_size() -> int | None:
-    """Total number of compiled variants held by the JIT function, or None.
-
-    Triton has moved this around between releases; return None so the caller
-    can skip rather than assert against an attribute that no longer exists.
-    """
-    for attr in ("device_caches", "cache"):
-        cache = getattr(chunk_scaled_dot_kkt_fwd_kernel, attr, None)
-        if isinstance(cache, dict):
-            total = 0
-            for entry in cache.values():
-                # device_caches values are tuples whose first element is the dict
-                target = entry[0] if isinstance(entry, tuple) and entry and isinstance(entry[0], dict) else entry
-                if isinstance(target, dict):
-                    total += len(target)
-            return total
-    return None
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@torch.inference_mode()
-def test_varying_task_num_does_not_recompile(dtype):
-    """Regression for #11577: ``bh_step``/``task_num``/``num_core`` are runtime args.
-
-    If they regress to ``tl.constexpr`` (or lose ``do_not_specialize``), every
-    new batch shape becomes a fresh compilation -- a latency cliff on the first
-    token of each new shape, not a wrong answer, so no numerical test catches it.
-    """
-    if _kernel_cache_size() is None:
-        pytest.skip("triton JITFunction cache layout not recognised on this version")
-
-    B, H, K = 1, 1, 64
-    shapes = [4, 7, 11, 23]
-
-    # Warm up on the first shape so the baseline excludes the initial compile.
-    k, beta, g_cumsum = _make_inputs(B, shapes[0] * CHUNK_SIZE, H, H, K, dtype, seed=6)
-    chunk_scaled_dot_kkt_fwd(k=k, beta=beta, g_cumsum=g_cumsum, cu_seqlens=None, chunk_size=CHUNK_SIZE)
-    baseline = _kernel_cache_size()
-
-    for nt in shapes[1:]:
-        k, beta, g_cumsum = _make_inputs(B, nt * CHUNK_SIZE, H, H, K, dtype, seed=6)
-        chunk_scaled_dot_kkt_fwd(k=k, beta=beta, g_cumsum=g_cumsum, cu_seqlens=None, chunk_size=CHUNK_SIZE)
-
-    assert _kernel_cache_size() == baseline, (
-        "kernel recompiled when task_num/bh_step/num_core changed; "
-        "these must stay runtime args with do_not_specialize (see #11577)"
-    )
