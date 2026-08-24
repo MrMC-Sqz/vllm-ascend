@@ -220,6 +220,16 @@ bf16/fp16 容差较宽，原因是 `Out` 在两个 kernel 之间被舍入到输�
 （对角结果先落盘，再由非对角 kernel 读回累加）。输入按 $Q,K \sim N(0, 1/d)$、$V \sim N(0,1)$
 构造，使输出量级为 O(1)，避免"输出接近 0 时任何容差都能过"的假通过。
 
+四个 kernel 没有各自的下发入口，用例只能经 `_attention.apply` 整体触发。
+下表给出每个 kernel 由哪些用例锁定，便于按 kernel 追溯：
+
+| kernel | 锁定它的用例 |
+|---|---|
+|`_fwd_diag_kernel`|`test_causal_property`（因果掩码，逐位相等）、`test_single_block_matches_exact_recurrence`（`n == BLOCK` 时输出全部来自本 kernel）、`test_..._matches_reference` 的尾块用例（#10276 的 padding 重置）|
+|`_fwd_kv_parallel`|`test_..._matches_reference` 中对 `kv` 全部前缀项的比对——该比对不经过 Q，与注意力输出解耦；`partial-block-left-shift` / `one-token-tail-block` / `tiny-single-cblock` 三个用例专打 `left_shift` 分支|
+|`_fwd_kv_reduce`|同上的前缀项比对（扫描结果逐块校验）、`kv[:, :, 0]` 恒等于入参的排他扫描不变量、`three-blocks`（扫描多于一步）、非零 `kv_history` 用例、256 对齐分段等价|
+|`_fwd_none_diag_kernel`|所有 `n > BLOCK` 的用例（跨块项只由它产生）、`test_zero_decay_multi_block_matches_exact_recurrence`、非零 `kv_history` 用例（历史项经由它回放）、256 对齐分段等价|
+
 覆盖范围：
 
 - 四个 kernel 的联合数值比对（`n` 小于/等于/大于 `BLOCK`，尾块只剩 1 个 token，
