@@ -4,15 +4,15 @@
 # Requires NPU and Triton-Ascend.
 
 import gc
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from vllm.v1.sample.ops.penalties import apply_all_penalties as v1_apply_all_penalties
 
+import vllm_ascend.ascend_config as ascend_config_module
 from vllm_ascend.sample.penalties import apply_all_penalties as ascend_apply_all_penalties
 
-from unittest.mock import MagicMock
-import vllm_ascend.ascend_config as ascend_config_module
 
 # This fixture will be automatically executed before running the test, forcibly tampering
 # with the underlying global variables, to trick the system's config initialization check

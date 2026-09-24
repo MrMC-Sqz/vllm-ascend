@@ -60,6 +60,7 @@ def pytest_runtest_makereport(item, call):
     if report.when == "call":
         print(f"{start_time}")
 
+
 # Before running all the test cases in this file, the hardware attributes of NPU
 # are automatically initialized to prevent errors reported by the underlying operators.
 @pytest.fixture(autouse=True)

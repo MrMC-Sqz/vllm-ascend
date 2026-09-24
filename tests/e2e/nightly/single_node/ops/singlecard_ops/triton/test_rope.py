@@ -7,8 +7,8 @@ from vllm_ascend.ops.triton.rope import (
     rope_forward_triton,
     rope_forward_triton_siso,
 )
-
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
 
 # Before running all the test cases in this file, the hardware attributes of NPU
 # are automatically initialized to prevent errors reported by the underlying operators.
@@ -174,7 +174,7 @@ def _rope_fp8_pytorch_native(
         positions_cpu = positions.to("cpu")
 
         half = rope_dim // 2
-        cos_sin = cos_sin_cache_cpu.index_select(0, positions).to(torch.float32)
+        cos_sin = cos_sin_cache_cpu.index_select(0, positions_cpu).to(torch.float32)
         cos = cos_sin[:, :half].unsqueeze(-2)
         sin = cos_sin[:, half:rope_dim].unsqueeze(-2)
 
@@ -294,13 +294,9 @@ def test_rotary_embedding_triton_kernel_fp8(
     device: str,
 ) -> None:
     # Ascend BiShengIR LLVM backend currently does not support FP8 conversion
-    pytest.skip(
-        "Ascend Triton compiler does not support FP8 compilation"
-    )
+    pytest.skip("Ascend Triton compiler does not support FP8 compilation")
     if rotary_dim & (rotary_dim - 1) != 0:
-        pytest.skip(
-            f"rotary_dim {rotary_dim} is not a power of 2, unsupported by Ascend Triton"
-        )
+        pytest.skip(f"rotary_dim {rotary_dim} is not a power of 2, unsupported by Ascend Triton")
     torch.manual_seed(0)
     torch.set_default_device(device)
 
@@ -389,18 +385,13 @@ def test_rotary_embedding_triton_kernel_siso(
     # Skip non-2 powers of 2 to avoid underlying aclnn Cast issues and Triton
     # compiler limitations.
     if rotary_dim & (rotary_dim - 1) != 0:
-        pytest.skip(
-            f"rotary_dim {rotary_dim} is not a power of 2, unsupported on"
-            " current Ascend environment."
-        )
+        pytest.skip(f"rotary_dim {rotary_dim} is not a power of 2, unsupported on current Ascend environment.")
     # Workaround for the 192 KB UB physical capacity limitation
     # In SISO mode , when is_neox_style is set to False, the internal vinterleave
     # temporary buffer reaches 144 KB. The double-buffered I/O will definitely exceed the
     # upper limit of the 192 KB UB physical capacity.
     if not is_neox_style:
-        pytest.skip(
-            "is_neox_style=False 192KB UB physical limit."
-        )
+        pytest.skip("is_neox_style=False 192KB UB physical limit.")
 
     # Skip invalid combinations where rotary_dim > head_size (RoPE cannot
     # rotate more dimensions than the head has).
